@@ -1,6 +1,6 @@
 # TextBundle Export — Obsidian Plugin
 
-Export any Obsidian note to the [TextBundle](http://textbundle.org/) format: the note's referenced images are copied into an `assets/` folder and packed together with the Markdown file — **the Markdown text itself is never modified** (no link rewriting, no format conversion, byte-for-byte identical).
+Export any Obsidian note to the [TextBundle](http://textbundle.org/) format: the note's referenced images are copied into an `assets/` folder and packed together with the Markdown file. Inside the exported copy, image references are repointed to the packed files in `assets/` — **your original note in the vault is never modified**.
 
 Works on **desktop and mobile** (`isDesktopOnly: false`, pure JavaScript, no Node.js APIs, zero runtime dependencies).
 
@@ -8,7 +8,7 @@ Works on **desktop and mobile** (`isDesktopOnly: false`, pure JavaScript, no Nod
 
 ```
 MyNote.textpack            (a zip archive, per the TextPack spec)
-├── text.md                ← your note, unchanged
+├── text.md                ← exported copy, image links repointed to assets/
 ├── info.json              ← TextBundle metadata (v2, net.daringfireball.markdown)
 └── assets/
     ├── photo.png          ← every image referenced by the note
@@ -17,12 +17,16 @@ MyNote.textpack            (a zip archive, per the TextPack spec)
 
 You can also export to an uncompressed `MyNote.textbundle/` folder instead of a `.textpack` zip (configurable in settings).
 
-Referenced images are detected in both Obsidian link styles:
+Referenced images are detected in both Obsidian link styles, and rewritten to standard Markdown links pointing into `assets/`:
 
-- Wiki embeds: `![[image.png]]`, `![[image.png|300]]`
-- Markdown images: `![alt](image.png)`, `![alt](<image with spaces.png>)`
+| In your note | In the exported `text.md` |
+| --- | --- |
+| `![[photo.png]]` | `![](assets/photo.png)` |
+| `![[photo.png\|300]]` | `![](assets/photo.png)` (size params dropped) |
+| `![[photo.png\|封面]]` | `![封面](assets/photo.png)` (alias kept as alt) |
+| `![alt](folder/photo.png)` | `![alt](assets/photo.png)` |
 
-Remote URLs (`http(s)://`, `data:`) are skipped. Non-image attachments are skipped — only image files are packed. Duplicate filenames coming from different vault folders are de-duplicated automatically (`image.png`, `image-2.png`, …).
+Remote URLs (`http(s)://`, `data:`) and non-image attachments are left untouched — only vault images are packed. Duplicate filenames coming from different vault folders are de-duplicated (`image.png`, `image-2.png`, …) and the rewritten links follow the de-duplicated names. Filenames with spaces are percent-encoded in the links.
 
 ## Usage
 

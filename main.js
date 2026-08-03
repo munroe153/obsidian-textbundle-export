@@ -122,6 +122,41 @@ function createZip(entries, date = new Date()) {
   return out.buffer;
 }
 
+// rewrite.ts
+function isDimension(alias) {
+  return /^\d+(x\d+)?$/.test(alias);
+}
+function encodeLinkTarget(path) {
+  return encodeURI(path).replace(
+    /[()]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+}
+function rewriteImageLinks(content, resolve) {
+  let out = content.replace(/!\[\[([^\]]+)\]\]/g, (match, inner) => {
+    const pipe = inner.indexOf("|");
+    const linkpath = (pipe >= 0 ? inner.slice(0, pipe) : inner).trim();
+    const alias = pipe >= 0 ? inner.slice(pipe + 1).trim() : "";
+    const target = resolve(linkpath);
+    if (!target)
+      return match;
+    const alt = isDimension(alias) ? "" : alias.replace(/[[\]]/g, "");
+    return `![${alt}](${target})`;
+  });
+  out = out.replace(
+    /!\[([^\]]*)\]\(\s*(?:<([^>]+)>|([^)\s]+))([^)]*)\)/g,
+    (match, alt, anglePath, plainPath) => {
+      var _a;
+      const linkpath = ((_a = anglePath != null ? anglePath : plainPath) != null ? _a : "").trim();
+      const target = resolve(linkpath);
+      if (!target)
+        return match;
+      return `![${alt}](${target})`;
+    }
+  );
+  return out;
+}
+
 // main.ts
 var DEFAULT_SETTINGS = {
   outputFormat: "textpack",
@@ -194,44 +229,49 @@ var TextBundleExportPlugin = class extends import_obsidian.Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
   }
+  /** Resolve a raw link path to an image file in the vault (null if none). */
+  resolveImage(linkpath, sourcePath) {
+    let p = linkpath.split("#")[0].split("^")[0].trim();
+    if (!p)
+      return null;
+    if (/^(https?|data|obsidian):/i.test(p))
+      return null;
+    try {
+      p = decodeURIComponent(p);
+    } catch (e) {
+    }
+    const dest = this.app.metadataCache.getFirstLinkpathDest(p, sourcePath);
+    if (dest && IMAGE_EXTENSIONS.has(dest.extension.toLowerCase())) {
+      return dest;
+    }
+    return null;
+  }
   /**
    * Collect the image files referenced by the note.
    * Handles wiki embeds `![[img.png]]` and Markdown images `![](img.png)`.
-   * The note's text is never modified — images are only copied as-is.
    */
   collectImages(file, content) {
     var _a;
     const images = [];
     const seen = /* @__PURE__ */ new Set();
-    const resolve = (rawLink) => {
-      let linkpath = rawLink.split("|")[0].split("#")[0].split("^")[0].trim();
-      if (!linkpath)
-        return;
-      if (/^(https?|data|obsidian):/i.test(linkpath))
-        return;
-      try {
-        linkpath = decodeURIComponent(linkpath);
-      } catch (e) {
-      }
-      const dest = this.app.metadataCache.getFirstLinkpathDest(
-        linkpath,
-        file.path
-      );
-      if (dest && IMAGE_EXTENSIONS.has(dest.extension.toLowerCase()) && !seen.has(dest.path)) {
-        seen.add(dest.path);
-        images.push(dest);
+    const add = (rawLink) => {
+      const img = this.resolveImage(rawLink, file.path);
+      if (img && !seen.has(img.path)) {
+        seen.add(img.path);
+        images.push(img);
       }
     };
     const wikiRe = /!\[\[([^\]]+)\]\]/g;
     let m;
     while ((m = wikiRe.exec(content)) !== null)
-      resolve(m[1]);
+      add(m[1]);
     const mdRe = /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))/g;
     while ((m = mdRe.exec(content)) !== null)
-      resolve((_a = m[1]) != null ? _a : m[2]);
+      add((_a = m[1]) != null ? _a : m[2]);
     return images;
   }
   async exportNote(file) {
+    var _a, _b;
     try {
       const content = await this.app.vault.read(file);
       const images = this.collectImages(file, content);
@@ -242,34 +282,38 @@ var TextBundleExportPlugin = class extends import_obsidian.Plugin {
       );
       const destFolder = await this.resolveDestFolder(file);
       const usedNames = /* @__PURE__ */ new Set();
-      const assetName = (f) => {
-        let name = f.name;
-        if (!usedNames.has(name.toLowerCase())) {
-          usedNames.add(name.toLowerCase());
-          return name;
+      const assetNames = /* @__PURE__ */ new Map();
+      for (const img of images) {
+        let name = img.name;
+        if (usedNames.has(name.toLowerCase())) {
+          let i = 2;
+          while (usedNames.has(
+            `${img.basename}-${i}.${img.extension}`.toLowerCase()
+          )) {
+            i++;
+          }
+          name = `${img.basename}-${i}.${img.extension}`;
         }
-        const base = f.basename;
-        let i = 2;
-        while (usedNames.has(`${base}-${i}.${f.extension}`.toLowerCase())) {
-          i++;
-        }
-        name = `${base}-${i}.${f.extension}`;
         usedNames.add(name.toLowerCase());
-        return name;
-      };
+        assetNames.set(img.path, name);
+      }
+      const bundleText = rewriteImageLinks(content, (linkpath) => {
+        const img = this.resolveImage(linkpath, file.path);
+        const name = img ? assetNames.get(img.path) : void 0;
+        return name ? encodeLinkTarget(`assets/${name}`) : null;
+      });
       const bundleBase = sanitizeName(file.basename);
       if (this.settings.outputFormat === "textpack") {
         const encoder = new TextEncoder();
         const entries = [
-          // the note text is written out byte-for-byte unchanged
-          { name: "text.md", data: encoder.encode(content) },
+          { name: "text.md", data: encoder.encode(bundleText) },
           { name: "info.json", data: encoder.encode(infoJson) },
           { name: "assets/", data: new Uint8Array(0) }
         ];
         for (const img of images) {
           const data = await this.app.vault.readBinary(img);
           entries.push({
-            name: `assets/${assetName(img)}`,
+            name: `assets/${(_a = assetNames.get(img.path)) != null ? _a : img.name}`,
             data: new Uint8Array(data)
           });
         }
@@ -280,7 +324,7 @@ var TextBundleExportPlugin = class extends import_obsidian.Plugin {
         );
         await this.app.vault.createBinary(outPath, bundle);
         new import_obsidian.Notice(
-          `Exported ${images.length} image(s) → ${outPath}`
+          `Exported ${images.length} image(s) \u2192 ${outPath}`
         );
       } else {
         const folderPath = this.availablePath(
@@ -288,7 +332,7 @@ var TextBundleExportPlugin = class extends import_obsidian.Plugin {
           `${bundleBase}.textbundle`
         );
         await this.ensureFolder(folderPath);
-        await this.app.vault.create(`${folderPath}/text.md`, content);
+        await this.app.vault.create(`${folderPath}/text.md`, bundleText);
         await this.app.vault.create(
           `${folderPath}/info.json`,
           infoJson
@@ -297,12 +341,12 @@ var TextBundleExportPlugin = class extends import_obsidian.Plugin {
         for (const img of images) {
           const data = await this.app.vault.readBinary(img);
           await this.app.vault.createBinary(
-            `${folderPath}/assets/${assetName(img)}`,
+            `${folderPath}/assets/${(_b = assetNames.get(img.path)) != null ? _b : img.name}`,
             data
           );
         }
         new import_obsidian.Notice(
-          `Exported ${images.length} image(s) → ${folderPath}`
+          `Exported ${images.length} image(s) \u2192 ${folderPath}`
         );
       }
     } catch (e) {
@@ -362,7 +406,7 @@ var TextBundleSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     new import_obsidian.Setting(containerEl).setName("Output format").setDesc(
-      "TextPack (.textpack) is a single zipped file; TextBundle (.textbundle) is a plain folder. The Markdown text itself is never modified in either case."
+      "TextPack (.textpack) is a single zipped file; TextBundle (.textbundle) is a plain folder. In the exported copy, image references are repointed to the packed assets/ files; your original note is never modified."
     ).addDropdown(
       (drop) => drop.addOption("textpack", "TextPack (.textpack, zipped)").addOption("textbundle", "TextBundle (.textbundle, folder)").setValue(this.plugin.settings.outputFormat).onChange(async (value) => {
         this.plugin.settings.outputFormat = value;

@@ -9,6 +9,7 @@ import {
 	normalizePath,
 } from "obsidian";
 import { createZip, ZipEntry } from "./zip";
+import { rewriteImageLinks, encodeLinkTarget } from "./rewrite";
 
 interface TextBundleExportSettings {
 	/** textpack = single zipped file; textbundle = plain folder */
@@ -93,47 +94,47 @@ export default class TextBundleExportPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	/** Resolve a raw link path to an image file in the vault (null if none). */
+	private resolveImage(linkpath: string, sourcePath: string): TFile | null {
+		// strip heading `#h` / block `^id` references
+		let p = linkpath.split("#")[0].split("^")[0].trim();
+		if (!p) return null;
+		if (/^(https?|data|obsidian):/i.test(p)) return null; // remote/URIs
+		try {
+			p = decodeURIComponent(p);
+		} catch {
+			/* keep as-is */
+		}
+		const dest = this.app.metadataCache.getFirstLinkpathDest(p, sourcePath);
+		if (dest && IMAGE_EXTENSIONS.has(dest.extension.toLowerCase())) {
+			return dest;
+		}
+		return null;
+	}
+
 	/**
 	 * Collect the image files referenced by the note.
 	 * Handles wiki embeds `![[img.png]]` and Markdown images `![](img.png)`.
-	 * The note's text is never modified — images are only copied as-is.
 	 */
 	private collectImages(file: TFile, content: string): TFile[] {
 		const images: TFile[] = [];
 		const seen = new Set<string>();
-
-		const resolve = (rawLink: string) => {
-			// strip alias `|alt`, heading `#h` and block `^id` references
-			let linkpath = rawLink.split("|")[0].split("#")[0].split("^")[0].trim();
-			if (!linkpath) return;
-			if (/^(https?|data|obsidian):/i.test(linkpath)) return; // remote/URIs
-			try {
-				linkpath = decodeURIComponent(linkpath);
-			} catch {
-				/* keep as-is */
-			}
-			const dest = this.app.metadataCache.getFirstLinkpathDest(
-				linkpath,
-				file.path
-			);
-			if (
-				dest &&
-				IMAGE_EXTENSIONS.has(dest.extension.toLowerCase()) &&
-				!seen.has(dest.path)
-			) {
-				seen.add(dest.path);
-				images.push(dest);
+		const add = (rawLink: string) => {
+			const img = this.resolveImage(rawLink, file.path);
+			if (img && !seen.has(img.path)) {
+				seen.add(img.path);
+				images.push(img);
 			}
 		};
 
 		// wiki embeds: ![[image.png]] / ![[image.png|300]]
 		const wikiRe = /!\[\[([^\]]+)\]\]/g;
 		let m: RegExpExecArray | null;
-		while ((m = wikiRe.exec(content)) !== null) resolve(m[1]);
+		while ((m = wikiRe.exec(content)) !== null) add(m[1]);
 
 		// markdown images: ![alt](path) / ![alt](<path with spaces>)
 		const mdRe = /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))/g;
-		while ((m = mdRe.exec(content)) !== null) resolve(m[1] ?? m[2]);
+		while ((m = mdRe.exec(content)) !== null) add(m[1] ?? m[2]);
 
 		return images;
 	}
@@ -152,41 +153,48 @@ export default class TextBundleExportPlugin extends Plugin {
 			// resolve the destination folder
 			const destFolder = await this.resolveDestFolder(file);
 
-			// ensure unique names inside assets/ (same filename may come
-			// from different vault folders)
+			// assign a unique name inside assets/ to every packed image
+			// (same filename may come from different vault folders)
 			const usedNames = new Set<string>();
-			const assetName = (f: TFile): string => {
-				let name = f.name;
-				if (!usedNames.has(name.toLowerCase())) {
-					usedNames.add(name.toLowerCase());
-					return name;
+			const assetNames = new Map<string, string>(); // vault path → bundle name
+			for (const img of images) {
+				let name = img.name;
+				if (usedNames.has(name.toLowerCase())) {
+					let i = 2;
+					while (
+						usedNames.has(
+							`${img.basename}-${i}.${img.extension}`.toLowerCase()
+						)
+					) {
+						i++;
+					}
+					name = `${img.basename}-${i}.${img.extension}`;
 				}
-				const base = f.basename;
-				let i = 2;
-				while (
-					usedNames.has(`${base}-${i}.${f.extension}`.toLowerCase())
-				) {
-					i++;
-				}
-				name = `${base}-${i}.${f.extension}`;
 				usedNames.add(name.toLowerCase());
-				return name;
-			};
+				assetNames.set(img.path, name);
+			}
+
+			// Repoint image references in the EXPORTED COPY to the packed
+			// files in assets/. The note in the vault is never modified.
+			const bundleText = rewriteImageLinks(content, (linkpath) => {
+				const img = this.resolveImage(linkpath, file.path);
+				const name = img ? assetNames.get(img.path) : undefined;
+				return name ? encodeLinkTarget(`assets/${name}`) : null;
+			});
 
 			const bundleBase = sanitizeName(file.basename);
 
 			if (this.settings.outputFormat === "textpack") {
 				const encoder = new TextEncoder();
 				const entries: ZipEntry[] = [
-					// the note text is written out byte-for-byte unchanged
-					{ name: "text.md", data: encoder.encode(content) },
+					{ name: "text.md", data: encoder.encode(bundleText) },
 					{ name: "info.json", data: encoder.encode(infoJson) },
 					{ name: "assets/", data: new Uint8Array(0) },
 				];
 				for (const img of images) {
 					const data = await this.app.vault.readBinary(img);
 					entries.push({
-						name: `assets/${assetName(img)}`,
+						name: `assets/${assetNames.get(img.path) ?? img.name}`,
 						data: new Uint8Array(data),
 					});
 				}
@@ -205,8 +213,7 @@ export default class TextBundleExportPlugin extends Plugin {
 					`${bundleBase}.textbundle`
 				);
 				await this.ensureFolder(folderPath);
-				// the note text is written out unchanged
-				await this.app.vault.create(`${folderPath}/text.md`, content);
+				await this.app.vault.create(`${folderPath}/text.md`, bundleText);
 				await this.app.vault.create(
 					`${folderPath}/info.json`,
 					infoJson
@@ -215,7 +222,9 @@ export default class TextBundleExportPlugin extends Plugin {
 				for (const img of images) {
 					const data = await this.app.vault.readBinary(img);
 					await this.app.vault.createBinary(
-						`${folderPath}/assets/${assetName(img)}`,
+						`${folderPath}/assets/${
+							assetNames.get(img.path) ?? img.name
+						}`,
 						data
 					);
 				}
@@ -293,7 +302,7 @@ class TextBundleSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Output format")
 			.setDesc(
-				"TextPack (.textpack) is a single zipped file; TextBundle (.textbundle) is a plain folder. The Markdown text itself is never modified in either case."
+				"TextPack (.textpack) is a single zipped file; TextBundle (.textbundle) is a plain folder. In the exported copy, image references are repointed to the packed assets/ files; your original note is never modified."
 			)
 			.addDropdown((drop) =>
 				drop

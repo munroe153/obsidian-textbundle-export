@@ -1,7 +1,7 @@
 {
 	"name": "obsidian-textbundle-export",
-	"version": "1.0.0",
-	"description": "Export Obsidian notes to TextBundle / TextPack (packs referenced images without altering the Markdown text). Works on desktop and mobile.",
+	"version": "1.1.0",
+	"description": "Export Obsidian notes to TextBundle / TextPack (packs referenced images into assets/ and repoints image links in the exported copy). Works on desktop and mobile.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
