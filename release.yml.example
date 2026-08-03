@@ -1,0 +1,49 @@
+# GitHub 的 OAuth token 权限限制，此文件未能直接放入 .github/workflows/。
+# 如需「打 tag 自动构建并发布 Release」，请在 GitHub 网页端将此文件移动为
+# .github/workflows/release.yml（网页端操作不受 workflow scope 限制）。
+#
+# To enable automatic releases, move this file to .github/workflows/release.yml
+
+name: Release Obsidian plugin
+
+on:
+  push:
+    tags:
+      - "*"
+
+env:
+  PLUGIN_NAME: textbundle-export
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18.x"
+
+      - name: Build plugin
+        run: |
+          npm install
+          npm run build
+
+      - name: Create release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: ${{ github.ref }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload plugin files
+        uses: AButler/upload-release-assets@v2.0
+        with:
+          files: main.js;manifest.json
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          release-tag: ${{ github.ref }}
