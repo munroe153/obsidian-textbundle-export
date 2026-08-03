@@ -1,0 +1,15 @@
+# node
+node_modules/
+
+# obsidian
+data.json
+
+# os
+.DS_Store
+
+# editors
+.idea/
+.vscode/
+
+# logs
+npm-debug.log*
