@@ -1,0 +1,10 @@
+{
+	"id": "textbundle-export",
+	"name": "TextBundle Export",
+	"version": "1.0.0",
+	"minAppVersion": "1.5.0",
+	"description": "Export notes as TextBundle/TextPack: packs the note's referenced images into an assets folder without changing the Markdown text. Works on desktop and mobile.",
+	"author": "munroe153",
+	"authorUrl": "https://github.com/munroe153",
+	"isDesktopOnly": false
+}
